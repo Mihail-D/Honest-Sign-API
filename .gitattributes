@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+# Treat all bat/cmd as text with CRLF when checked out on Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Ensure images/binaries are not modified
+*.jar binary
+*.war binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.docx binary
+
