@@ -39,3 +39,6 @@ target/
 /.mvn
 /mvnw.cmd
 /mvnw
+
+# Локальная документация/скелеты, не коммитим
+/docs/CrptApi-Javadoc-skeleton.md
