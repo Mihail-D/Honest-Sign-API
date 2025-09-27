@@ -103,11 +103,13 @@ public final class CrptApi {
         public TimeoutCrptApiException(String msg, Throwable cause) { super(msg, cause); }
     }
 
+    @SuppressWarnings({"unused","UnusedReturnValue"})
     public Result createDocumentForDomesticGoods(Object document, String signature)
             throws InterruptedException, CrptApiException {
         return createDocumentForDomesticGoodsParsed(document, signature, null).raw;
     }
 
+    @SuppressWarnings({"unused","UnusedReturnValue"})
     public Result createDocumentForDomesticGoods(Object document, String signature, CallOptions options)
             throws InterruptedException, CrptApiException {
         return createDocumentForDomesticGoodsParsed(document, signature, options).raw;
