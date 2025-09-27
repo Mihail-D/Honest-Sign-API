@@ -333,14 +333,10 @@ public final class CrptApi {
         }
         public Builder authBearer(String token) { return defaultHeader("Authorization", "Bearer " + token); }
         public Builder contentTypeJson() { return defaultHeader("Content-Type", "application/json"); }
-        public Builder timeouts(Duration connect, Duration read) {
-            HttpConfig base = httpConfig == null ? HttpConfig.defaults() : httpConfig;
-            this.httpConfig = new HttpConfig(base.baseUri, connect, read, base.defaultHeaders);
-            return this;
-        }
         public Builder httpExecutor(HttpExecutor exec) { this.httpExecutor = exec; return this; }
         public Builder json(JsonSerializer serializer) { this.json = serializer; return this; }
         public Builder logger(Logger logger) { this.logger = logger; return this; }
+        @SuppressWarnings({"unused"})
         public Builder rateLimiter(RateLimiter limiter) { this.rateLimiter = limiter; return this; }
         public CrptApi build() { if (httpConfig == null) httpConfig = HttpConfig.defaults(); return new CrptApi(this); }
     }
@@ -377,7 +373,7 @@ public final class CrptApi {
                     if (waitNanos <= 0) {
                         waitNanos = Math.max(50_000L, windowNanos / 100);
                     }
-                    nextWindowCond.awaitNanos(waitNanos);
+                    long ignored = nextWindowCond.awaitNanos(waitNanos);
                 }
             } finally {
                 lock.unlock();
@@ -422,6 +418,7 @@ public final class CrptApi {
     public interface Logger {
         void debug(Supplier<String> msg);
         void warn(Supplier<String> msg);
+        @SuppressWarnings({"unused"})
         void error(Supplier<String> msg, Throwable t);
         static Logger noop() { return new Logger() {
             public void debug(Supplier<String> msg) { }
