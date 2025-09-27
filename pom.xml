@@ -16,6 +16,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
         <enforcer.java.version>[17,)</enforcer.java.version>
+        <jackson.version>2.17.2</jackson.version>
+        <junit.jupiter.version>5.10.2</junit.jupiter.version>
     </properties>
 
     <build>
@@ -76,11 +78,23 @@
     </build>
 
     <dependencies>
-        <!-- Зависимостей пока нет. Добавьте Jackson/HTTP клиент при необходимости. -->
+        <!-- Jackson JSON -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Тесты -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.2</version>
+            <version>${junit.jupiter.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
