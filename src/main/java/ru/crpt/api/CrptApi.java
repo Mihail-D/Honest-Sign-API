@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
@@ -14,38 +15,17 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
-/**
- * Клиент API Честного знака.
- * На данном этапе реализовано ограничение количества
- * запросов в фиксированном временном окне (1 единица {@link TimeUnit}).
- * Добавлены поддержка HTTP/JSON и каркас метода создания документа.
- * Будущие сетевые методы обязаны вызывать {@link #acquirePermit()} перед
- * обращением к удаленному API.
- */
 public final class CrptApi {
-    /** Внутренний лимитер запросов. */
     private final RateLimiter rateLimiter;
-
-    /** HTTP-исполнитель. */
     private final HttpExecutor httpExecutor;
-    /** JSON-сериализатор. */
     private final JsonSerializer json;
-    /** Конфигурация HTTP. */
     private final HttpConfig httpConfig;
+    private final Logger logger;
 
-    /** Путь эндпоинта по умолчанию для создания документа. */
     private static final String DEFAULT_CREATE_DOC_PATH = "/api/v3/lk/documents/create";
 
-    /**
-     * Создает инстанс API клиента с ограничением количества запросов в интервале.
-     * Используются значения по умолчанию для HTTP/JSON: HttpClient и Jackson.
-     *
-     * @param timeUnit     единица времени, определяющая длину окна (строго 1 единица: 1 секунда, 1 минута и т.п.)
-     * @param requestLimit положительное число запросов, допустимых в каждом окне
-     * @throws NullPointerException     если {@code timeUnit} == null
-     * @throws IllegalArgumentException если {@code requestLimit} <= 0
-     */
     public CrptApi(TimeUnit timeUnit, int requestLimit) {
         Objects.requireNonNull(timeUnit, "единица времени");
         if (requestLimit <= 0) {
@@ -55,22 +35,18 @@ public final class CrptApi {
         this.httpConfig = HttpConfig.defaults();
         this.httpExecutor = new JavaHttpClientExecutor(httpConfig);
         this.json = new JacksonJsonSerializer();
+        this.logger = Logger.noop();
     }
 
-    /**
-     * Конструктор из билдера для расширенной конфигурации.
-     */
     CrptApi(Builder b) {
         Objects.requireNonNull(b, "builder");
         this.rateLimiter = b.rateLimiter != null ? b.rateLimiter : new FixedWindowRateLimiter(b.limitRequests, b.limitUnit);
         this.httpConfig = b.httpConfig != null ? b.httpConfig : HttpConfig.defaults();
         this.httpExecutor = b.httpExecutor != null ? b.httpExecutor : new JavaHttpClientExecutor(this.httpConfig);
         this.json = b.json != null ? b.json : new JacksonJsonSerializer();
+        this.logger = b.logger != null ? b.logger : Logger.noop();
     }
 
-    // ------------------- ПУБЛИЧНЫЕ МЕТОДЫ API -------------------
-
-    /** Результат HTTP-вызова. */
     public static final class Result {
         public final int statusCode;
         public final String body;
@@ -82,11 +58,19 @@ public final class CrptApi {
         }
     }
 
-    /** Опции вызова. */
+    public static final class CreateDocResult {
+        public final Result raw;
+        public final CreateDocResponse parsed;
+        public CreateDocResult(Result raw, CreateDocResponse parsed) {
+            this.raw = raw;
+            this.parsed = parsed;
+        }
+    }
+
     public static final class CallOptions {
         public final Map<String, String> headers;
         public final Duration requestTimeout;
-        public final String productGroup; // альтернативно pg в query
+        public final String productGroup;
         public CallOptions(Map<String, String> headers, Duration requestTimeout, String productGroup) {
             this.headers = headers;
             this.requestTimeout = requestTimeout;
@@ -97,47 +81,53 @@ public final class CrptApi {
         }
     }
 
-    /** Общее исключение уровня клиента. */
     public static class CrptApiException extends Exception {
         public final Integer statusCode;
         public final String responseBody;
         public CrptApiException(String message, Throwable cause) { super(message, cause); this.statusCode = null; this.responseBody = null; }
         public CrptApiException(String message, Integer statusCode, String responseBody) { super(message); this.statusCode = statusCode; this.responseBody = responseBody; }
     }
-
-    /**
-     * Создание документа для ввода в оборот товара, произведённого в РФ.
-     * Каркас: выполняется ограничение по частоте, подготовка JSON и HTTP-запроса.
-     *
-     * @param document  объект документа доменной модели (будет сериализован в JSON и обёрнут в Base64)
-     * @param signature откреплённая подпись (УКЭП, CMS/PKCS#7) в Base64
-     * @return результат HTTP-вызова
-     * @throws NullPointerException  если аргументы null
-     * @throws InterruptedException  при прерывании ожидания разрешения лимитером
-     * @throws CrptApiException      при ошибках сериализации/HTTP
-     */
-    public Result createDocumentForDomesticGoods(Object document, String signature)
-            throws InterruptedException, CrptApiException {
-        return createDocumentForDomesticGoods(document, signature, null);
+    public static class RateLimitExceededException extends CrptApiException {
+        public RateLimitExceededException(String msg, Integer code, String body) { super(msg, code, body); }
+    }
+    public static class BadRequestException extends CrptApiException {
+        public BadRequestException(String msg, Integer code, String body) { super(msg, code, body); }
+    }
+    public static class AuthenticationException extends CrptApiException {
+        public AuthenticationException(String msg, Integer code, String body) { super(msg, code, body); }
+    }
+    public static class ServerErrorException extends CrptApiException {
+        public ServerErrorException(String msg, Integer code, String body) { super(msg, code, body); }
+    }
+    public static class TimeoutCrptApiException extends CrptApiException {
+        public TimeoutCrptApiException(String msg, Throwable cause) { super(msg, cause); }
     }
 
-    /** Перегрузка с опциями вызова. См. описание основного метода. */
+    @SuppressWarnings({"unused","UnusedReturnValue"})
+    public Result createDocumentForDomesticGoods(Object document, String signature)
+            throws InterruptedException, CrptApiException {
+        return createDocumentForDomesticGoodsParsed(document, signature, null).raw;
+    }
+
+    @SuppressWarnings({"unused","UnusedReturnValue"})
     public Result createDocumentForDomesticGoods(Object document, String signature, CallOptions options)
+            throws InterruptedException, CrptApiException {
+        return createDocumentForDomesticGoodsParsed(document, signature, options).raw;
+    }
+
+    public CreateDocResult createDocumentForDomesticGoodsParsed(Object document, String signature, CallOptions options)
             throws InterruptedException, CrptApiException {
         Objects.requireNonNull(document, "document");
         Objects.requireNonNull(signature, "signature");
 
-        // 1) Ограничение частоты
         acquirePermit();
 
         try {
-            // 2) Сериализуем исходный объект документа в JSON и кодируем Base64
             String docJson = json.toJson(document);
             String productDocument = Base64.getEncoder().encodeToString(docJson.getBytes(StandardCharsets.UTF_8));
 
-            // 3) Формируем полезную нагрузку запроса
             CreateDocRequest payload = new CreateDocRequest(
-                    "MANUAL", // формат: JSON
+                    "MANUAL",
                     productDocument,
                     options != null ? options.productGroup : null,
                     signature,
@@ -145,17 +135,32 @@ public final class CrptApi {
             );
             String body = json.toJson(payload);
 
-            // 4) Строим URL: baseUri + path + optional ?pg=
             URI uri = httpConfig.baseUri.resolve(DEFAULT_CREATE_DOC_PATH + buildPgQuerySuffix(options));
 
-            // 5) Заголовки: объединяем дефолтные + опциональные из CallOptions
             Map<String, String> headers = new HashMap<>(httpConfig.defaultHeaders);
             headers.putIfAbsent("Content-Type", "application/json");
             if (options != null && options.headers != null) headers.putAll(options.headers);
 
-            // 6) Выполняем HTTP
+            logger.debug(() -> "POST " + uri + ", headers=" + headers.keySet());
+
             HttpReq req = new HttpReq("POST", uri, headers, body, options != null ? options.requestTimeout : httpConfig.readTimeout);
-            return httpExecutor.execute(req);
+            Result raw = httpExecutor.execute(req);
+
+            logger.debug(() -> "Response: status=" + raw.statusCode + ", headersKeys=" + raw.headers.keySet());
+
+            if (raw.statusCode >= 200 && raw.statusCode < 300) {
+                CreateDocResponse parsed = null;
+                if (raw.body != null && !raw.body.isBlank()) {
+                    try {
+                        parsed = json.fromJson(raw.body, CreateDocResponse.class);
+                    } catch (Exception parseEx) {
+                        logger.warn(() -> "Не удалось распарсить тело успешного ответа: " + parseEx.getMessage());
+                    }
+                }
+                return new CreateDocResult(raw, parsed);
+            }
+
+            throw mapStatusToException(raw);
         } catch (CrptApiException e) {
             throw e;
         } catch (Exception e) {
@@ -163,42 +168,35 @@ public final class CrptApi {
         }
     }
 
+    private CrptApiException mapStatusToException(Result raw) {
+        int sc = raw.statusCode;
+        String body = raw.body;
+        if (sc == 429) return new RateLimitExceededException("Превышен лимит запросов (429)", sc, body);
+        if (sc == 400 || sc == 422) return new BadRequestException("Некорректные данные в запросе (" + sc + ")", sc, body);
+        if (sc == 401 || sc == 403) return new AuthenticationException("Ошибка аутентификации/авторизации (" + sc + ")", sc, body);
+        if (sc >= 500 && sc <= 599) return new ServerErrorException("Ошибка сервера ЧЗ (" + sc + ")", sc, body);
+        return new CrptApiException("Неуспешный статус ответа: " + sc, sc, body);
+    }
+
     private static String buildPgQuerySuffix(CallOptions options) {
         if (options == null || options.productGroup == null || options.productGroup.isBlank()) return "";
         return "?pg=" + options.productGroup;
     }
 
-    // ------------------- ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ БУДУЩИХ ВЫЗОВОВ -------------------
-
-    /**
-     * Блокирующее ожидание разрешения на выполнение одного запроса в рамках лимита.
-     * Должно вызываться непосредственно перед сетевым обращением.
-     *
-     * @throws InterruptedException если поток был прерван во время ожидания
-     */
     void acquirePermit() throws InterruptedException {
         rateLimiter.acquire();
     }
 
-    /**
-     * Неблокирующая попытка получить разрешение на запрос.
-     *
-     * @return {@code true}, если разрешение получено немедленно, иначе {@code false}
-     */
     boolean tryAcquirePermit() {
         return rateLimiter.tryAcquire();
     }
 
-    // ------------------- ВНУТРЕННИЕ ТИПЫ: HTTP/JSON/DTO -------------------
-
-    /** Простейший контракт лимитера. */
-    interface RateLimiter {
+    public interface RateLimiter {
         void acquire() throws InterruptedException;
         boolean tryAcquire();
     }
 
-    /** HTTP запрос для внутреннего исполнителя. */
-    static final class HttpReq {
+    public static final class HttpReq {
         final String method;
         final URI uri;
         final Map<String, String> headers;
@@ -213,7 +211,6 @@ public final class CrptApi {
         }
     }
 
-    /** Конфигурация HTTP. */
     static final class HttpConfig {
         final URI baseUri;
         final Duration connectTimeout;
@@ -235,13 +232,11 @@ public final class CrptApi {
         }
     }
 
-    /** Интерфейс HTTP-исполнителя. */
-    interface HttpExecutor extends AutoCloseable {
+    public interface HttpExecutor extends AutoCloseable {
         Result execute(HttpReq request) throws CrptApiException;
-        @Override default void close() { /* no-op */ }
+        @Override default void close() { }
     }
 
-    /** Реализация на java.net.http.HttpClient. */
     static final class JavaHttpClientExecutor implements HttpExecutor {
         private final HttpClient client;
         private final HttpConfig cfg;
@@ -273,35 +268,34 @@ public final class CrptApi {
                 }
                 HttpResponse<String> resp = client.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 return new Result(resp.statusCode(), resp.body(), resp.headers().map());
+            } catch (HttpTimeoutException tex) {
+                throw new TimeoutCrptApiException("Истек таймаут HTTP-запроса", tex);
             } catch (Exception e) {
                 throw new CrptApiException("Ошибка HTTP-вызова", e);
             }
         }
     }
 
-    /** Интерфейс сериализации JSON. */
-    interface JsonSerializer {
+    public interface JsonSerializer {
         String toJson(Object value) throws Exception;
         <T> T fromJson(String json, Class<T> type) throws Exception;
     }
 
-    /** Реализация на Jackson. */
     static final class JacksonJsonSerializer implements JsonSerializer {
         private final com.fasterxml.jackson.databind.ObjectMapper mapper;
         JacksonJsonSerializer() {
             mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            mapper.findAndRegisterModules(); // jsr310 и т.п.
+            mapper.findAndRegisterModules();
             mapper.setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
         }
         @Override public String toJson(Object value) throws Exception { return mapper.writeValueAsString(value); }
         @Override public <T> T fromJson(String json, Class<T> type) throws Exception { return mapper.readValue(json, type); }
     }
 
-    /** DTO: тело запроса создания документа. */
     static final class CreateDocRequest {
         public final String document_format;
         public final String product_document;
-        public final String product_group; // опционально
+        public final String product_group;
         public final String signature;
         public final String type;
         CreateDocRequest(String document_format, String product_document, String product_group, String signature, String type) {
@@ -313,10 +307,7 @@ public final class CrptApi {
         }
     }
 
-    /** DTO: успешный ответ создания документа. */
-    static final class CreateDocResponse { public String value; }
-
-    // ------------------- BUILDER -------------------
+    public static final class CreateDocResponse { public String value; }
 
     public static final class Builder {
         private RateLimiter rateLimiter;
@@ -325,6 +316,7 @@ public final class CrptApi {
         private HttpConfig httpConfig;
         private HttpExecutor httpExecutor;
         private JsonSerializer json;
+        private Logger logger;
 
         public Builder limit(TimeUnit unit, int requests) { this.limitUnit = Objects.requireNonNull(unit); this.limitRequests = requests; return this; }
         public Builder baseUrl(String baseUrl) {
@@ -341,38 +333,27 @@ public final class CrptApi {
         }
         public Builder authBearer(String token) { return defaultHeader("Authorization", "Bearer " + token); }
         public Builder contentTypeJson() { return defaultHeader("Content-Type", "application/json"); }
-        public Builder timeouts(Duration connect, Duration read) {
-            HttpConfig base = httpConfig == null ? HttpConfig.defaults() : httpConfig;
-            this.httpConfig = new HttpConfig(base.baseUri, connect, read, base.defaultHeaders);
-            return this;
-        }
         public Builder httpExecutor(HttpExecutor exec) { this.httpExecutor = exec; return this; }
         public Builder json(JsonSerializer serializer) { this.json = serializer; return this; }
+        public Builder logger(Logger logger) { this.logger = logger; return this; }
+        @SuppressWarnings({"unused"})
         public Builder rateLimiter(RateLimiter limiter) { this.rateLimiter = limiter; return this; }
         public CrptApi build() { if (httpConfig == null) httpConfig = HttpConfig.defaults(); return new CrptApi(this); }
     }
 
-    // ------------------- RATE LIMITER -------------------
-
-    /**
-     * Реализация лимитера с фиксированным окном: не более N запросов за 1 интервал timeUnit.
-     * Потокобезопасная, с использованием справедливой блокировки.
-     */
     static final class FixedWindowRateLimiter implements RateLimiter {
         private final int limit;
-        private final long windowNanos; // длительность окна
-
-        private final ReentrantLock lock = new ReentrantLock(true); // справедливая блокировка
+        private final long windowNanos;
+        private final ReentrantLock lock = new ReentrantLock(true);
         private final Condition nextWindowCond = lock.newCondition();
-
-        private long windowStartNanos; // начало текущего окна
-        private int usedInWindow;      // сколько уже выдано разрешений в окне
+        private long windowStartNanos;
+        private int usedInWindow;
 
         FixedWindowRateLimiter(int limit, TimeUnit unit) {
             if (limit <= 0) throw new IllegalArgumentException("limit должен быть > 0");
             Objects.requireNonNull(unit, "единица времени");
             this.limit = limit;
-            this.windowNanos = unit.toNanos(1L); // окно = 1 единица времени
+            this.windowNanos = unit.toNanos(1L);
             this.windowStartNanos = System.nanoTime();
             this.usedInWindow = 0;
         }
@@ -390,10 +371,9 @@ public final class CrptApi {
                     }
                     long waitNanos = nanosUntilNextWindow(now);
                     if (waitNanos <= 0) {
-                        // На всякий случай, чтобы избежать активного ожидания — короткое ожидание
-                        waitNanos = Math.max(50_000L, windowNanos / 100); // >=50 мкс или 1% окна
+                        waitNanos = Math.max(50_000L, windowNanos / 100);
                     }
-                    nextWindowCond.awaitNanos(waitNanos);
+                    long ignored = nextWindowCond.awaitNanos(waitNanos);
                 }
             } finally {
                 lock.unlock();
@@ -421,7 +401,6 @@ public final class CrptApi {
         private void resetWindowIfElapsed(long now) {
             long elapsed = now - windowStartNanos;
             if (elapsed >= windowNanos) {
-                // Сдвигаем старт на целое число окон, чтобы не накапливать дрейф
                 long windowsPassed = Math.max(1L, elapsed / windowNanos);
                 windowStartNanos += windowsPassed * windowNanos;
                 usedInWindow = 0;
@@ -434,5 +413,17 @@ public final class CrptApi {
             long remaining = windowNanos - elapsed;
             return remaining > 0 ? remaining : 0L;
         }
+    }
+
+    public interface Logger {
+        void debug(Supplier<String> msg);
+        void warn(Supplier<String> msg);
+        @SuppressWarnings({"unused"})
+        void error(Supplier<String> msg, Throwable t);
+        static Logger noop() { return new Logger() {
+            public void debug(Supplier<String> msg) { }
+            public void warn(Supplier<String> msg) { }
+            public void error(Supplier<String> msg, Throwable t) { }
+        }; }
     }
 }

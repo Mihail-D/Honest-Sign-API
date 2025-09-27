@@ -49,7 +49,7 @@ curl "https://ismp.crpt.ru/api/v3/lk/documents/create" \
 Тело запроса (описание полей)
 - document_format: enum (обязателен)
   - Формат исходного документа:
-    - MANUAL — JSON (в product_document кладётся Base64 от JSON-строки, например Base64(JSON.stringify(...)))
+    - MANUAL — JSON (в product_document кладётся Base64 от JSON-строки)
     - XML — XML (в product_document кладётся Base64 от XML)
     - CSV — CSV (в product_document кладётся Base64 от CSV)
 - product_document: string (обязателен)
@@ -152,7 +152,7 @@ curl "https://ismp.crpt.ru/api/v3/lk/documents/create" \
 - LP_SHIP_GOODS_CROSSBORDER_XML — отгрузка для кроссбордера (XML)
 - LP_CANCEL_SHIPMENT_CROSSBORDER — отмена отгрузки для кроссбордера (JSON)
 
-Связанные эндпоинты (по исходнику)
+Связанные эндпоинты
 - /api/v3/lk/documents/commissioning/indi/create — ввод в оборот единичного товара
 - /api/v3/lk/documents/commissioning/contract/create — ввод в оборот по договору
 - /api/v3/lk/documents/send — отправка документов
@@ -169,5 +169,4 @@ curl "https://ismp.crpt.ru/api/v3/lk/documents/create" \
 - /api/v3/lk/documents/aggregation/create — агрегация
 
 Примечания
-- Метод универсальный: может применяться вместо специализированных методов создания документов по конкретным типам (при наличии соответствующей конфигурации).
-- В исходном RTF обнаружены артефакты кодировки; приведённый конспект нормализован.
+- Метод универсальный: может применяться вместо специализированных методов созд��ния документов по конкретным типам (при наличии соответствующей конфигурации).
