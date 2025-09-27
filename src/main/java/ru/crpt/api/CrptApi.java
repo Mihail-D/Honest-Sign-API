@@ -196,7 +196,7 @@ public final class CrptApi {
         boolean tryAcquire();
     }
 
-    static final class HttpReq {
+    public static final class HttpReq {
         final String method;
         final URI uri;
         final Map<String, String> headers;
